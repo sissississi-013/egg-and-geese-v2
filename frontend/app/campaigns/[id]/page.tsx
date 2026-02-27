@@ -28,6 +28,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import SwarmVisualization from "./swarm-visualization";
 
 // Pipeline stage definitions
 const PIPELINE_STAGES = [
@@ -254,6 +255,9 @@ export default function CampaignDetailPage() {
           </div>
         </div>
       )}
+
+      {/* Agent Swarm Visualization */}
+      <SwarmVisualization campaignId={campaignId} isRunning={!!pipelineRunning} />
 
       {/* Metrics Summary */}
       {summary && (

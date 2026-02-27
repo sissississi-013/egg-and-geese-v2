@@ -26,6 +26,18 @@ from app.models.metrics import ScoutedPost
 logger = logging.getLogger(__name__)
 
 
+# Type for progress callback
+from typing import Callable
+
+ProgressCallback = Callable[[str, str, str, str, dict], None]
+"""(agent, action, detail, status, meta)"""
+
+
+def _noop_progress(agent: str, action: str, detail: str = "", status: str = "running", meta: dict | None = None):
+    """Default no-op progress callback."""
+    pass
+
+
 class AgentPipeline:
     """Orchestrates the complete agent pipeline for a campaign cycle.
 
@@ -43,6 +55,7 @@ class AgentPipeline:
         platforms: list[str] | None = None,
         expected_visual_context: str | None = None,
         campaign_schema: dict[str, Any] | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         """Run the complete pipeline from onboarding to execution.
 
@@ -55,6 +68,8 @@ class AgentPipeline:
         Returns:
             Full pipeline result with all traces and stats.
         """
+        emit = on_progress or _noop_progress
+
         start = datetime.utcnow()
         traces: list[dict] = []
         result: dict[str, Any] = {"status": "running", "traces": traces}
@@ -62,6 +77,8 @@ class AgentPipeline:
         # ---- Phase 1: Intent Extraction (for new campaigns) ----
         if campaign_data:
             logger.info("Pipeline: Phase 1 — Intent Extraction (GLiNER + Senso)")
+            emit("intent", "extracting", "Analyzing product description with GLiNER NER", "running")
+            emit("intent", "gliner_call", "Running zero-shot entity extraction (Fastino API)", "running")
             intent_result = await IntentAgent.process(campaign_data)
             traces.append(intent_result["trace"])
 
@@ -90,6 +107,21 @@ class AgentPipeline:
                 "campaign_schema": campaign_schema,
             }
 
+            n_pain = len(pain_points or [])
+            n_benefits = len(intent_result["extracted_entities"].get("benefits", []))
+            n_features = len(intent_result["extracted_entities"].get("key_features", []))
+            emit("intent", "entities_extracted",
+                 f"Found {n_pain} pain points, {n_benefits} benefits, {n_features} features",
+                 "done",
+                 {"pain_points": n_pain, "benefits": n_benefits, "features": n_features})
+            if campaign_schema:
+                n_labels = len(campaign_schema.get("scouting_labels", []))
+                emit("intent", "schema_built",
+                     f"Generated campaign schema with {n_labels} scouting labels",
+                     "done",
+                     {"scouting_labels": n_labels})
+            emit("intent", "completed", "Intent extraction complete", "done")
+
         if not campaign_id or not product_id:
             raise ValueError("campaign_id and product_id are required")
 
@@ -107,6 +139,7 @@ class AgentPipeline:
 
         # ---- Phase 2: Scouting (GLiNER entity-driven scoring) ----
         logger.info("Pipeline: Phase 2 — Scouting across %s (entity-driven)", platforms)
+        emit("scout", "yutori_call", f"Querying Yutori Scouts API across {', '.join(platforms or [])}", "running")
         scout_result = await ScoutAgent.scout(
             campaign_id=campaign_id,
             product_id=product_id,
@@ -116,6 +149,14 @@ class AgentPipeline:
         )
         traces.append(scout_result["trace"])
         result["scouting"] = scout_result["stats"]
+
+        total_found = scout_result["stats"].get("total_found", 0)
+        total_relevant = scout_result["stats"].get("total_relevant", total_found)
+        emit("scout", "scoring", f"GLiNER entity-overlap scoring on {total_found} posts", "running")
+        emit("scout", "completed",
+             f"Found {total_relevant} relevant posts out of {total_found} total",
+             "done",
+             {"total": total_found, "relevant": total_relevant})
 
         scouted_posts = [
             ScoutedPost(**p) for p in scout_result["posts"]
@@ -128,6 +169,7 @@ class AgentPipeline:
 
         # ---- Phase 3: Visual Analysis ----
         logger.info("Pipeline: Phase 3 — Visual Scout (Reka Vision)")
+        emit("vision", "reka_call", f"Sending {len(scouted_posts)} post images to Reka Vision API", "running")
         vision_result = await VisionAgent.analyze_posts(
             campaign_id=campaign_id,
             posts=scouted_posts,
@@ -136,10 +178,17 @@ class AgentPipeline:
         traces.append(vision_result["trace"])
         result["vision"] = vision_result["stats"]
 
+        analyzed = vision_result["stats"].get("analyzed", 0)
+        emit("vision", "completed",
+             f"Analyzed {analyzed} post images for visual context",
+             "done",
+             {"analyzed": analyzed})
+
         enriched_posts = vision_result["enriched_posts"]
 
         # ---- Phase 4: Strategy & Comment Generation ----
         logger.info("Pipeline: Phase 4 — Strategy (Claude + Senso)")
+        emit("strategy", "claude_call", "Claude drafting humanized engagement comments", "running")
         campaign_context = (
             f"Product: {result.get('intent', {}).get('extracted_entities', {}).get('product_name', 'Unknown')}\n"
             f"Pain points: {', '.join(pain_points)}\n"
@@ -153,14 +202,23 @@ class AgentPipeline:
             campaign_context=campaign_context,
         )
         traces.append(strategy_result["trace"])
+        planned = len(strategy_result["engagements"])
         result["strategy"] = {
             "strategy_id": strategy_result["strategy_id"],
-            "planned_engagements": len(strategy_result["engagements"]),
+            "planned_engagements": planned,
             "reasoning": strategy_result["reasoning"],
         }
 
+        emit("strategy", "senso_validate", "Validating product claims via Senso API", "running")
+        emit("strategy", "gliner_claims", "GLiNER extracting structured claims from drafts", "running")
+        emit("strategy", "completed",
+             f"Planned {planned} engagements with validated comments",
+             "done",
+             {"planned": planned, "reasoning": strategy_result["reasoning"][:100]})
+
         # ---- Phase 5: Execution via OpenClaw ----
         logger.info("Pipeline: Phase 5 — Execution (OpenClaw Gateway)")
+        emit("engagement", "openclaw_call", f"Dispatching {planned} engagements via OpenClaw", "running")
         executed: list[dict[str, Any]] = []
 
         for eng in strategy_result["engagements"]:
@@ -220,10 +278,30 @@ class AgentPipeline:
             "details": executed,
         }
 
+        success_count = sum(1 for e in executed if e["status"] == "success")
+        failed_count = sum(1 for e in executed if e["status"] == "failed")
+
+        # Emit per-execution events (first 5)
+        for detail in executed[:5]:
+            emit("engagement", "posted",
+                 f"{detail['action']} on {detail['platform']} — {detail['status']}",
+                 "done" if detail["status"] == "success" else "error",
+                 detail)
+
+        emit("engagement", "completed",
+             f"Executed {success_count}/{len(executed)} engagements ({failed_count} failed)",
+             "done",
+             {"total": len(executed), "success": success_count, "failed": failed_count})
+
         duration_ms = int((datetime.utcnow() - start).total_seconds() * 1000)
         result["status"] = "completed"
         result["total_duration_ms"] = duration_ms
         result["traces"] = traces
+
+        emit("coordinator", "pipeline_complete",
+             f"Pipeline finished in {duration_ms}ms",
+             "done",
+             {"duration_ms": duration_ms})
 
         logger.info(
             "Pipeline complete: %d engagements executed in %dms",

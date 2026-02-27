@@ -63,6 +63,10 @@ export const api = {
   getActivity: (limit = 50) =>
     request<any>(`/api/agents/activity?limit=${limit}`),
 
+  // Campaign-specific agent activity log (for swarm visualization)
+  getCampaignActivity: (id: string, since = 0) =>
+    request<any>(`/api/campaigns/${id}/activity?since=${since}`),
+
   // Strategies
   getStrategies: (minUsage = 1, limit = 10) =>
     request<any>(`/api/agents/strategies?min_usage=${minUsage}&limit=${limit}`),

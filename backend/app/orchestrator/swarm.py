@@ -10,8 +10,10 @@ import asyncio
 import logging
 from typing import Any
 
+from typing import Callable
+
 from app.models.campaign import CampaignCreate, CampaignStatus
-from app.orchestrator.pipeline import AgentPipeline
+from app.orchestrator.pipeline import AgentPipeline, ProgressCallback
 from app.agents.learning_agent import LearningAgent
 from app.services.metrics_service import MetricsService
 from app.services.neo4j_service import Neo4jService
@@ -30,6 +32,7 @@ class SwarmCoordinator:
     async def launch_campaign(
         cls,
         campaign_data: CampaignCreate,
+        on_progress: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         """Initialize and run the first pipeline cycle for a new campaign.
 
@@ -39,7 +42,8 @@ class SwarmCoordinator:
         logger.info("SwarmCoordinator: launching new campaign '%s'", campaign_data.name)
 
         result = await AgentPipeline.run_full_cycle(
-            campaign_data=campaign_data
+            campaign_data=campaign_data,
+            on_progress=on_progress,
         )
 
         campaign_id = result.get("intent", {}).get("campaign_id", "")

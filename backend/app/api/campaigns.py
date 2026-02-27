@@ -28,6 +28,20 @@ router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 # In-memory store (replace with PostgreSQL in production)
 _campaigns: dict[str, dict] = {}
 
+# In-memory activity log per campaign — ordered list of agent events
+_activity_logs: dict[str, list[dict]] = {}
+
+
+def _log_activity(campaign_id: str, event: dict):
+    """Append an activity event to the campaign's log."""
+    if campaign_id not in _activity_logs:
+        _activity_logs[campaign_id] = []
+    event.setdefault("timestamp", datetime.utcnow().isoformat())
+    _activity_logs[campaign_id].append(event)
+    # Cap at 200 events per campaign
+    if len(_activity_logs[campaign_id]) > 200:
+        _activity_logs[campaign_id] = _activity_logs[campaign_id][-200:]
+
 
 # ── Smart Campaign Creation (static paths — MUST come before /{campaign_id}) ─
 
@@ -608,30 +622,51 @@ async def create_campaign(data: CampaignCreate):
     async def _run_pipeline():
         pipeline_status = _campaigns[campaign_id]["pipeline_status"]
 
-        def _update_stage(stage: str, agent: str | None = None):
-            if stage != pipeline_status["stage"]:
-                prev = pipeline_status["stage"]
-                if prev and prev not in ("starting", "completed", "error"):
-                    if prev not in pipeline_status["stages_completed"]:
-                        pipeline_status["stages_completed"].append(prev)
-            pipeline_status["stage"] = stage
-            pipeline_status["current_agent"] = agent
+        # Map agent names to pipeline stages for automatic stage tracking
+        _agent_to_stage = {
+            "intent": ("intent", "Intent Agent"),
+            "scout": ("scouting", "Scout Agent"),
+            "vision": ("vision", "Vision Agent"),
+            "strategy": ("strategy", "Strategy Agent"),
+            "engagement": ("engagement", "Engagement"),
+        }
+
+        def _on_progress(agent: str, action: str, detail: str = "", status: str = "running", meta: dict | None = None):
+            """Callback from pipeline — logs activity AND updates pipeline stage."""
+            # Log the activity event
+            _log_activity(campaign_id, {
+                "agent": agent,
+                "action": action,
+                "detail": detail,
+                "status": status,
+                "meta": meta or {},
+            })
+
+            # Auto-advance pipeline stage based on agent
+            if agent in _agent_to_stage:
+                stage_key, stage_label = _agent_to_stage[agent]
+                current = pipeline_status["stage"]
+                if current != stage_key and stage_key != "completed":
+                    # Mark previous stage as completed
+                    if current and current not in ("starting", "completed", "error"):
+                        if current not in pipeline_status["stages_completed"]:
+                            pipeline_status["stages_completed"].append(current)
+                    pipeline_status["stage"] = stage_key
+                    pipeline_status["current_agent"] = stage_label
 
         try:
             _logger.info("Background pipeline starting for campaign %s", campaign_id)
+            _on_progress("coordinator", "pipeline_start", "Swarm pipeline initialized")
 
-            _update_stage("intent", "Intent Agent")
-            _logger.info("[%s] Running Intent Agent...", campaign_id)
-
-            # Wrap in try so each stage can fail gracefully
             result: dict[str, Any] = {}
             try:
-                result = await SwarmCoordinator.launch_campaign(data)
+                result = await SwarmCoordinator.launch_campaign(data, on_progress=_on_progress)
             except Exception as stage_err:
                 _logger.error("[%s] Pipeline stage failed: %s", campaign_id, stage_err)
                 pipeline_status["error"] = f"Pipeline error: {str(stage_err)[:200]}"
+                _on_progress("coordinator", "error", str(stage_err)[:200], "error")
 
-            # Mark all stages as completed (SwarmCoordinator runs them all)
+            # ---- Finalize ----
             for s in ["intent", "scouting", "vision", "strategy", "engagement"]:
                 if s not in pipeline_status["stages_completed"]:
                     pipeline_status["stages_completed"].append(s)
@@ -664,7 +699,7 @@ async def create_campaign(data: CampaignCreate):
             pipeline_status["stage"] = "error"
             pipeline_status["current_agent"] = None
             pipeline_status["error"] = str(e)[:200]
-            # Keep campaign active — extracted data is still valid
+            _on_progress("coordinator", "pipeline_error", str(e)[:200], "error")
 
     asyncio.create_task(_run_pipeline())
 
@@ -693,6 +728,20 @@ async def get_campaign(campaign_id: str):
     if campaign_id not in _campaigns:
         raise HTTPException(404, "Campaign not found")
     return _campaigns[campaign_id]
+
+
+@router.get("/{campaign_id}/activity")
+async def get_campaign_activity(campaign_id: str, since: int = 0):
+    """Get the agent activity log for a campaign.
+
+    `since` is a 0-based index — only events after that index are returned.
+    This allows the frontend to incrementally poll for new events.
+    """
+    events = _activity_logs.get(campaign_id, [])
+    return {
+        "events": events[since:],
+        "total": len(events),
+    }
 
 
 @router.post("/{campaign_id}/cycle")
