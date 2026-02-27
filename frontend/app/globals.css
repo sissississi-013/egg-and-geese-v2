@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Light mode (default) */
+  :root {
+    --background: 30 20% 98%;
+    --foreground: 20 14% 10%;
+    --card: 0 0% 100%;
+    --card-foreground: 20 14% 10%;
+    --primary: 25 95% 53%;
+    --primary-foreground: 0 0% 100%;
+    --muted: 30 10% 95%;
+    --muted-foreground: 20 10% 40%;
+    --border: 30 10% 88%;
+    --ring: 25 95% 53%;
+    --destructive: 0 84% 60%;
+  }
+
+  /* Dark mode */
+  .dark {
+    --background: 20 14% 4%;
+    --foreground: 30 10% 95%;
+    --card: 20 14% 7%;
+    --card-foreground: 30 10% 95%;
+    --primary: 25 95% 53%;
+    --primary-foreground: 0 0% 100%;
+    --muted: 20 10% 15%;
+    --muted-foreground: 20 10% 65%;
+    --border: 20 10% 18%;
+    --ring: 25 95% 53%;
+    --destructive: 0 84% 60%;
+  }
+
+  * {
+    border-color: hsl(var(--border));
+  }
+
+  body {
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-feature-settings: "rlig" 1, "calt" 1;
+    transition: background-color 0.2s, color 0.2s;
+  }
+}
+
+@layer utilities {
+  .glow-brand {
+    box-shadow: 0 0 20px rgba(249, 115, 22, 0.15),
+      0 0 60px rgba(249, 115, 22, 0.05);
+  }
+
+  .gradient-text {
+    background: linear-gradient(135deg, #fb923c, #f97316, #ea580c);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .card-hover {
+    @apply transition-all duration-200 hover:border-brand-500/30 hover:glow-brand;
+  }
+}
